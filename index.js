@@ -8,41 +8,64 @@ app.use(express.json({ limit: '10mb' }));
 
 const N8N_WEBHOOK = 'https://primary-production-26151.up.railway.app/webhook/agendadoccomercialmedico';
 
+// Armazena respostas do AgendaDoc por telefone
+const respostas = {};
+
+// ─── ENTRADA: Simulador → N8N ─────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   try {
-    // O simulador envia um array [ { headers, body, ... } ]
-    // O N8N espera receber exatamente esse array diretamente
-    // Problema anterior: o proxy reencapsulava req.body inteiro, gerando headers duplicados
-    // Solução: extrair o array original e encaminhar só ele
     let payload = req.body;
-
-    // Se vier como array, pegar o primeiro item e encaminhar o body interno
-    // para que o N8N receba no formato correto da Evolution API
+    let forward = payload;
     if (Array.isArray(payload) && payload.length > 0 && payload[0].body) {
-      // O simulador já manda o array correto — encaminhar diretamente
-      // sem adicionar nova camada de headers
-      const forward = payload[0].body;
-      const r = await axios.post(N8N_WEBHOOK, forward, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 60000
-      });
-      return res.status(r.status).json(r.data);
+      forward = payload[0].body;
     }
-
-    // Fallback: encaminhar como veio
-    const r = await axios.post(N8N_WEBHOOK, payload, {
+    const r = await axios.post(N8N_WEBHOOK, forward, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 60000
     });
     res.status(r.status).json(r.data);
-
   } catch (err) {
-    const status = err.response?.status || 500;
-    res.status(status).json({ erro: err.message });
+    res.status(err.response?.status || 500).json({ erro: err.message });
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+// ─── SAÍDA: N8N envia resposta aqui em vez da Evolution API ───────────────
+// Body esperado: { "telefone": "5585991110001", "texto": "Olá! Sou a Ranielle..." }
+app.post('/resposta', (req, res) => {
+  const { telefone, texto, number } = req.body;
+  const tel = telefone || number;
+
+  if (!tel || !texto) {
+    return res.status(400).json({ erro: 'Campos obrigatorios: telefone, texto' });
+  }
+
+  if (!respostas[tel]) respostas[tel] = [];
+  respostas[tel].push({ texto, ts: Date.now() });
+  if (respostas[tel].length > 10) respostas[tel].shift();
+
+  console.log(`[resposta] ${tel}: "${texto.substring(0, 60)}"`);
+  res.json({ ok: true, telefone: tel });
+});
+
+// ─── POLLING: Simulador busca resposta ────────────────────────────────────
+// GET /buscar-resposta?telefone=5585991110001&apos=1717000000000
+app.get('/buscar-resposta', (req, res) => {
+  const { telefone, apos } = req.query;
+  if (!telefone) return res.status(400).json({ erro: 'Parametro telefone obrigatorio' });
+
+  const aposTs = parseInt(apos) || 0;
+  const msgs = (respostas[telefone] || []).filter(m => m.ts > aposTs);
+
+  if (msgs.length > 0) {
+    const ultima = msgs[msgs.length - 1];
+    return res.json({ encontrado: true, texto: ultima.texto, ts: ultima.ts });
+  }
+
+  res.json({ encontrado: false });
+});
+
+// ─── HEALTH ────────────────────────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({ ok: true, version: '2.0' }));
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Proxy rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy AgendaDoc v2 rodando na porta ${PORT}`));
