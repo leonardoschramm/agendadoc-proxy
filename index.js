@@ -29,32 +29,46 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ─── SAÍDA: N8N envia resposta aqui em vez da Evolution API ───────────────
-// Body esperado: { "telefone": "5585991110001", "texto": "Olá! Sou a Ranielle..." }
+// ─── SAÍDA: N8N envia resposta aqui ───────────────────────────────────────
+// Aceita qualquer combinação de nomes de campo:
+//   { telefone, texto }   ← padrão do proxy
+//   { number, text }      ← formato Evolution API (como o N8N envia)
+//   { to, body }          ← variações possíveis
 app.post('/resposta', (req, res) => {
-  const { telefone, texto, number } = req.body;
-  const tel = telefone || number;
+  const body = req.body;
+
+  const tel  = body.telefone || body.number || body.to || body.phone || null;
+  const texto = body.texto   || body.text   || body.body || body.message || body.mensagem || null;
+
+  console.log('[resposta] recebido:', JSON.stringify(body).substring(0, 200));
 
   if (!tel || !texto) {
-    return res.status(400).json({ erro: 'Campos obrigatorios: telefone, texto' });
+    console.log('[resposta] campos faltando — recebido:', Object.keys(body).join(', '));
+    return res.status(400).json({
+      erro: 'Campos obrigatorios: telefone (ou number) e texto (ou text)',
+      recebido: Object.keys(body)
+    });
   }
 
-  if (!respostas[tel]) respostas[tel] = [];
-  respostas[tel].push({ texto, ts: Date.now() });
-  if (respostas[tel].length > 10) respostas[tel].shift();
+  // Normalizar telefone — remover @s.whatsapp.net se vier junto
+  const telLimpo = tel.toString().replace('@s.whatsapp.net', '').replace('@lid', '');
 
-  console.log(`[resposta] ${tel}: "${texto.substring(0, 60)}"`);
-  res.json({ ok: true, telefone: tel });
+  if (!respostas[telLimpo]) respostas[telLimpo] = [];
+  respostas[telLimpo].push({ texto, ts: Date.now() });
+  if (respostas[telLimpo].length > 10) respostas[telLimpo].shift();
+
+  console.log(`[resposta] armazenado para ${telLimpo}: "${texto.substring(0, 60)}"`);
+  res.json({ ok: true, telefone: telLimpo });
 });
 
 // ─── POLLING: Simulador busca resposta ────────────────────────────────────
-// GET /buscar-resposta?telefone=5585991110001&apos=1717000000000
 app.get('/buscar-resposta', (req, res) => {
   const { telefone, apos } = req.query;
   if (!telefone) return res.status(400).json({ erro: 'Parametro telefone obrigatorio' });
 
-  const aposTs = parseInt(apos) || 0;
-  const msgs = (respostas[telefone] || []).filter(m => m.ts > aposTs);
+  const telLimpo = telefone.replace('@s.whatsapp.net', '').replace('@lid', '');
+  const aposTs   = parseInt(apos) || 0;
+  const msgs     = (respostas[telLimpo] || []).filter(m => m.ts > aposTs);
 
   if (msgs.length > 0) {
     const ultima = msgs[msgs.length - 1];
@@ -64,8 +78,13 @@ app.get('/buscar-resposta', (req, res) => {
   res.json({ encontrado: false });
 });
 
+// ─── DEBUG: ver todas as respostas armazenadas ─────────────────────────────
+app.get('/debug', (_, res) => {
+  res.json({ respostas });
+});
+
 // ─── HEALTH ────────────────────────────────────────────────────────────────
-app.get('/health', (_, res) => res.json({ ok: true, version: '2.0' }));
+app.get('/health', (_, res) => res.json({ ok: true, version: '3.0' }));
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Proxy AgendaDoc v2 rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy AgendaDoc v3 rodando na porta ${PORT}`));
